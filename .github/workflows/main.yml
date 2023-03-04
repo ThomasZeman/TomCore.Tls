@@ -27,13 +27,13 @@ jobs:
           
       - name: "Deploy to tomcore.io"
         shell: pwsh
-        env:
-          AZCOPY_SPA_CLIENT_SECRET: ${{ secrets.AZURE_STORAGE_SECRET }}
         run: |
           C:\msys64\usr\bin\wget.exe https://aka.ms/downloadazcopy-v10-windows -O azcopy.zip
           Expand-Archive .\azcopy.zip
           $azcopy = ls -r -inc azcopy.exe | % {$_.fullname}
-          cmd /c $azcopy login --service-principal --application-id ${{ secrets.AZURE_APPLICATION_ID }} --tenant-id ${{ secrets.AZURE_TENANT_ID }}
+          $creds = '${{ secrets.AZURE_RBAC_CREDENTIALS }}' | ConvertFrom-Json
+          $env:AZCOPY_SPA_CLIENT_SECRET=$creds.clientSecret
+          cmd /c $azcopy login --service-principal --application-id ${{ $creds.clientId }} --tenant-id ${{ $creds.tenantId }}
           pushd '.\deploy'
           cmd /c $azcopy copy .\* ${{ secrets.AZURE_STORAGE_BLOB_ENDPOINT }}releases
           popd
