@@ -18,7 +18,9 @@ namespace TomCore.Tls.Functions.CertificateGeneration
 {
     public class AcmeCertificateGeneration
     {
-        private const string RunEverySundayCron = "0 0 0 * * 0";
+        // We are using an unusual time because Let's Encrypt gets overwhelmed with requests at e.g. midnight:
+        // https://community.letsencrypt.org/t/new-service-busy-responses-beginning-during-high-load/184174
+        private const string RunEveryCron = "17 01 23 * * 1"; // 23:01:17 UTC every Monday 
 
         private readonly ILogger _logger;
         private readonly Uri _acmeUri;
@@ -30,7 +32,7 @@ namespace TomCore.Tls.Functions.CertificateGeneration
         }
 
         [Function(nameof(AcmeCertificateGeneration))]
-        public static Task Run([TimerTrigger(RunEverySundayCron)] TimerInfo myTimer, FunctionContext context)
+        public static Task Run([TimerTrigger(RunEveryCron)] TimerInfo myTimer, FunctionContext context)
         {
             var logger = context.GetLogger(nameof(AcmeCertificateGeneration));
             try
