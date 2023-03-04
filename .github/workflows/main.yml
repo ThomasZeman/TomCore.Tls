@@ -32,8 +32,8 @@ jobs:
           Expand-Archive .\azcopy.zip
           $azcopy = ls -r -inc azcopy.exe | % {$_.fullname}
           $creds = '${{ secrets.AZURE_RBAC_CREDENTIALS }}' | ConvertFrom-Json
-          $env:AZCOPY_SPA_CLIENT_SECRET=$creds.clientSecret
-          cmd /c $azcopy login --service-principal --application-id ${{ $creds.clientId }} --tenant-id ${{ $creds.tenantId }}
+          $env:AZCOPY_SPA_CLIENT_SECRET = $creds.clientSecret
+          cmd /c $azcopy login --service-principal --application-id $creds.clientId --tenant-id $creds.tenantId
           pushd '.\deploy'
           cmd /c $azcopy copy .\* ${{ secrets.AZURE_STORAGE_BLOB_ENDPOINT }}releases
           popd
