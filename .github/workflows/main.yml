@@ -1,0 +1,40 @@
+﻿name: Build
+
+on:
+  [push]
+  
+jobs:
+  build-and-deploy:
+    runs-on: windows-latest
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@main
+        
+      - name: "Install .NET 6"  
+        uses: actions/setup-dotnet@v2
+        with:
+          dotnet-version: '6.0.x'
+          include-prerelease: false
+
+      - name: "Build TomCore.Tls.Functions"
+        run: dotnet publish .\src\TomCore.Tls.Functions --output .\out\TomCore.Tls.Functions\ -c release --no-self-contained
+        
+      - name: "Zip Azure Function"
+        shell: pwsh
+        run: |
+          mkdir deploy
+          Compress-Archive -Path .\out\TomCore.Tls.Functions\* -DestinationPath .\deploy\TomCore.Tls.Functions_${{github.run_number}}.zip
+          
+      - name: "Deploy to tomcore.io"
+        shell: pwsh
+        run: |
+          C:\msys64\usr\bin\wget.exe https://aka.ms/downloadazcopy-v10-windows -O azcopy.zip
+          Expand-Archive .\azcopy.zip
+          $azcopy = ls -r -inc azcopy.exe | % {$_.fullname}
+          $creds = '${{ secrets.AZURE_RBAC_CREDENTIALS }}' | ConvertFrom-Json
+          $env:AZCOPY_SPA_CLIENT_SECRET = $creds.clientSecret
+          cmd /c $azcopy login --service-principal --application-id $creds.clientId --tenant-id $creds.tenantId
+          pushd '.\deploy'
+          cmd /c $azcopy copy .\* ${{ secrets.AZURE_STORAGE_BLOB_ENDPOINT }}releases
+          popd
+          cmd /c $azcopy logout
