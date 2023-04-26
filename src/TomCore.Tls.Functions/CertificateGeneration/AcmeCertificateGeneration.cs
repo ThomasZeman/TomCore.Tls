@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Net.Http;
 using System.Threading.Tasks;
 using Azure.Core;
 using Azure.Identity;
@@ -82,14 +83,14 @@ namespace TomCore.Tls.Functions.CertificateGeneration
         {
             var secretClient = new SecretClient(keyVaultUri, new DefaultAzureCredential());
             var accName = "acme-account-" + _acmeUri.Host.Replace(".", "").Replace("-", "");
-            _logger.LogInformation("Getting Acme account info from Azure KeyVault");
+            _logger.LogInformation("Getting Acme account info from Azure KeyVault ({AccName})", accName);
             return
                 await OnResponse.Get<AcmeContext>()
                     .ForCode(404, () => GetContextForNewAcmeAccount(email, accountKeyAsPem => secretClient.SetSecretAsync(accName, accountKeyAsPem)))
                     .Evaluate(() => secretClient.GetSecretAsync(accName), response => GetContextForExistingAcmeAccount(response.Value.Value));
         }
 
-        private async Task RunDnsChallenges(AcmeAccountData acmeAccountData, IEnumerable<CertificateOrderInfo> certificateOrderInfo)
+        public async Task RunDnsChallenges(AcmeAccountData acmeAccountData, IEnumerable<CertificateOrderInfo> certificateOrderInfo)
         {
             var accountContext = await GetOrCreateAcmeAccountContext(acmeAccountData.KeyVaultUri, acmeAccountData.AcmeAdminEmail);
             foreach (var orderInfo in certificateOrderInfo)
@@ -104,6 +105,24 @@ namespace TomCore.Tls.Functions.CertificateGeneration
                 }
             }
         }
+        
+        private static string GetSubdomainName(string zone, string subdomainFqdn)
+        {
+            if (zone == subdomainFqdn)
+            {
+                return string.Empty;
+            }
+
+            string suffix = "." + zone;
+            int index = subdomainFqdn.LastIndexOf(suffix, StringComparison.OrdinalIgnoreCase);
+
+            if (index > 0)
+            {
+                return string.Concat(".", subdomainFqdn.AsSpan(0, index));
+            }
+
+            return string.Empty;
+        }
 
         private async Task CreateCertificate(IAcmeContext accountContext, CertificateOrderInfo orderInfo)
         {
@@ -117,19 +136,20 @@ namespace TomCore.Tls.Functions.CertificateGeneration
 
             _logger.LogInformation("Creating order");
             var order = await accountContext.NewOrder(new[] {domainName});
-
             _logger.LogInformation("Starting Authorization");
             var authorizationContext = await order.Authorization(domainName);
             _logger.LogInformation("Getting DNS Authorization");
             var dnsChallenge = await authorizationContext.Dns();
+
             var dnsTxt = accountContext.AccountKey.DnsTxt(dnsChallenge.Token);
 
             var validationStartedAt = DateTime.Now;
             Challenge status;
 
-            await using (await SetDnsTxtChallenge(orderInfo, "_acme-challenge", dnsTxt))
+            var dnsTxtChallenge = await SetDnsTxtChallenge(orderInfo, "_acme-challenge" + GetSubdomainName(orderInfo.ZoneName, orderInfo.DomainName), dnsTxt);
+            await using (dnsTxtChallenge)
             {
-                status = await dnsChallenge.Validate();
+                status = await ValidateChallenge(dnsChallenge);
                 while (status.Status != ChallengeStatus.Invalid && status.Status != ChallengeStatus.Valid)
                 {
                     var timePassed = DateTime.Now - validationStartedAt;
@@ -139,10 +159,10 @@ namespace TomCore.Tls.Functions.CertificateGeneration
                         break;
                     }
 
-                    _logger.LogInformation("Challenge still pending (status: {@Status}). Time passed: {TimePassed}. Retrying in 500ms...", status, timePassed);
+                    _logger.LogInformation("Challenge still pending (status: {Status}). Time passed: {TimePassed}. Retrying in 500ms...", status.Status, timePassed);
                     await Task.Delay(500);
-                    status = await dnsChallenge.Validate();
-                    _logger.LogInformation("Dns Challenge has status: {@Status}", status);
+                    status = await ValidateChallenge(dnsChallenge);
+                    _logger.LogInformation("Dns Challenge has status: {Status}", status.Status);
                 }
             }
 
@@ -168,16 +188,32 @@ namespace TomCore.Tls.Functions.CertificateGeneration
             await certificateClient.ImportCertificateAsync(new ImportCertificateOptions(NormalizeHostName(domainName), pfx));
         }
 
+        private async Task<Challenge> ValidateChallenge(IChallengeContext challengeContext)
+        {
+            var location = challengeContext.Location;
+            try
+            {
+                var status = await challengeContext.Validate();
+                return status;
+            }
+            catch (Exception)
+            {
+                var result = await new HttpClient().GetAsync(location);
+                _logger.LogInformation("Challenge failed with error: {Error}", result.Content.AsString());
+                throw;
+            }
+        }
+        
         private async Task<IAsyncDisposable> SetDnsTxtChallenge(CertificateOrderInfo orderInfo, string recordName, string dnsTxt)
         {
-            _logger.LogInformation("Getting azure management token");
+            _logger.LogDebug("Getting azure management token");
             var credential = new DefaultAzureCredential();
             var token = await credential.GetTokenAsync(new TokenRequestContext(new[] {"https://management.core.windows.net/.default"}));
 
-            _logger.LogInformation("Creating DNSManagementClient");
+            _logger.LogDebug("Creating DNSManagementClient");
             var dnsManagementClient = new DnsManagementClient(new TokenCredentials(token.Token)) {SubscriptionId = orderInfo.SubscriptionId};
 
-            _logger.LogInformation("Setting Txt Record");
+            _logger.LogInformation("Setting Txt Record - ResourceGroup: {ResourceGroup} ZoneName: {ZoneName} RecordName: {RecordName}", orderInfo.ResourceGroupName, orderInfo.ZoneName, recordName);
             var recordSetParams = new RecordSet {TTL = 3600, TxtRecords = new List<TxtRecord> {new(new List<string> {dnsTxt})}};
 
             await dnsManagementClient.RecordSets.CreateOrUpdateAsync(
@@ -188,11 +224,11 @@ namespace TomCore.Tls.Functions.CertificateGeneration
                 recordSetParams);
             return new Disposer(() =>
             {
-                _logger.LogInformation("Removing Txt Record");
+                _logger.LogInformation("Removing Txt Record - ResourceGroup: {ResourceGroup} ZoneName: {ZoneName} RecordName: {RecordName}", orderInfo.ResourceGroupName, orderInfo.ZoneName, recordName);
                 return dnsManagementClient.RecordSets.DeleteAsync(orderInfo.ResourceGroupName, orderInfo.ZoneName, recordName, RecordType.TXT);
             });
         }
 
-        private static string NormalizeHostName(string hostName) => hostName.Replace(".", "-");
+        private static string NormalizeHostName(string hostName) => hostName.Replace(".", "-").Replace("*","wildcard");
     }
 }
