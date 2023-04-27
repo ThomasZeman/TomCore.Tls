@@ -108,6 +108,10 @@ namespace TomCore.Tls.Functions.CertificateGeneration
         
         private static string GetSubdomainName(string zone, string subdomainFqdn)
         {
+            if (subdomainFqdn.StartsWith("*."))
+            {
+                subdomainFqdn = subdomainFqdn.Remove(0, 2);
+            }
             if (zone == subdomainFqdn)
             {
                 return string.Empty;
@@ -186,6 +190,8 @@ namespace TomCore.Tls.Functions.CertificateGeneration
 
             _logger.LogInformation("Uploading certificate to KeyVault");
             await certificateClient.ImportCertificateAsync(new ImportCertificateOptions(NormalizeHostName(domainName), pfx));
+            
+            _logger.LogInformation("Finished creation for: {DomainName}", domainName);
         }
 
         private async Task<Challenge> ValidateChallenge(IChallengeContext challengeContext)
