@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 using Azure.Core;
@@ -228,6 +229,36 @@ namespace TomCore.Tls.Functions.CertificateGeneration
                 recordName,
                 RecordType.TXT,
                 recordSetParams);
+            
+            var validationStartedAt = DateTime.Now;
+            while (true)
+            {
+                var retrievedRecordSet = await dnsManagementClient.RecordSets.GetAsync(
+                    orderInfo.ResourceGroupName,
+                    orderInfo.ZoneName, 
+                    recordName, 
+                    RecordType.TXT);
+
+                if (retrievedRecordSet.TxtRecords.Count > 0)
+                {
+                    var recordFound = retrievedRecordSet.TxtRecords.Any(txtRecord => txtRecord.Value.Any(txtValue => txtValue == dnsTxt));
+                    if (recordFound)
+                    {
+                        break;
+                    }
+                }
+
+                var timePassed = DateTime.Now - validationStartedAt;
+                if (timePassed > TimeSpan.FromSeconds(30))
+                {
+                    _logger.LogError("Timeout reached for validating correct txt content");
+                    throw new Exception($"Validating txt content for zone {orderInfo.ZoneName} failed");
+                }
+                
+                _logger.LogInformation("Could no retrieve correct txt content yet. Retrying");
+                await Task.Delay(TimeSpan.FromMilliseconds(1000));
+            }
+            
             return new Disposer(() =>
             {
                 _logger.LogInformation("Removing Txt Record - ResourceGroup: {ResourceGroup} ZoneName: {ZoneName} RecordName: {RecordName}", orderInfo.ResourceGroupName, orderInfo.ZoneName, recordName);
